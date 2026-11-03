@@ -59,6 +59,7 @@ class CameraModule : public RefBase {
     void getVendorTagOps(vendor_tag_ops_t* ops);
     bool isSetTorchModeSupported() const;
     int setTorchMode(const char* camera_id, bool enable);
+    void turnOffLegacyTorch(const char* camera_id);
     uint16_t getModuleApiVersion() const;
     const char* getModuleName() const;
     uint16_t getHalApiVersion() const;
@@ -81,7 +82,10 @@ class CameraModule : public RefBase {
     static void appendAvailableKeys(CameraMetadata& chars, int32_t keyTag,
                                     const Vector<int32_t>& appendKeys);
     status_t filterOpenErrorCode(status_t err);
+    std::string getLegacyTorchLed(const char* camera_id) const;
+    bool writeLegacyTorch(const char* camera_id, const std::string& led, bool enable) const;
     camera_module_t* mModule;
+    const camera_module_callbacks_t* mCallbacks = nullptr;
     int mNumberOfCameras;
     KeyedVector<int, camera_info> mCameraInfoMap;
     KeyedVector<int, int> mDeviceVersionMap;

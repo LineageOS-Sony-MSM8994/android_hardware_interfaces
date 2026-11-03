@@ -184,6 +184,15 @@ private:
     void releaseRecordingFrameLocked(uint32_t memId, uint32_t bufferIndex, const native_handle_t*);
 
     // shared memory methods
+    int mMemorySlot = -1;
+    int claimMemorySlot();
+    void releaseMemorySlot();
+    camera_request_memory memoryCallback() const;
+    static camera_memory_t* sGetMemorySlot(int slot, int fd, size_t buf_size, uint_t num_bufs);
+    static camera_memory_t* sGetMemory0(int fd, size_t buf_size, uint_t num_bufs, void *user);
+    static camera_memory_t* sGetMemory1(int fd, size_t buf_size, uint_t num_bufs, void *user);
+    static camera_memory_t* sGetMemory2(int fd, size_t buf_size, uint_t num_bufs, void *user);
+    static camera_memory_t* sGetMemory3(int fd, size_t buf_size, uint_t num_bufs, void *user);
     static camera_memory_t* sGetMemory(int fd, size_t buf_size, uint_t num_bufs, void *user);
     static void sPutMemory(camera_memory_t *data);
 

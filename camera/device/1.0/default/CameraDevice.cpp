@@ -16,6 +16,7 @@
 
 #define LOG_TAG "CamDev@1.0-impl"
 
+#include <atomic>
 #include <fcntl.h>
 
 #include <hardware/camera.h>
@@ -38,6 +39,9 @@ using ::android::hardware::graphics::common::V1_0::BufferUsage;
 using ::android::hardware::graphics::common::V1_0::PixelFormat;
 
 HandleImporter CameraDevice::sHandleImporter;
+
+static constexpr int kMaxMemorySlots = 4;
+static std::atomic<CameraDevice*> sMemorySlots[kMaxMemorySlots];
 
 Status CameraDevice::getHidlStatus(const int& status) {
     switch (status) {
@@ -362,9 +366,66 @@ CameraDevice::CameraHeapMemory::~CameraHeapMemory() {
 }
 
 // shared memory methods
+int CameraDevice::claimMemorySlot() {
+    for (int i = 0; i < kMaxMemorySlots; i++) {
+        CameraDevice* expected = nullptr;
+        if (sMemorySlots[i].compare_exchange_strong(expected, this)) {
+            return i;
+        }
+    }
+    ALOGE("%s: no free memory slot for camera %s", __FUNCTION__, mCameraId.c_str());
+    return -1;
+}
+
+void CameraDevice::releaseMemorySlot() {
+    if (mMemorySlot >= 0) {
+        sMemorySlots[mMemorySlot] = nullptr;
+        mMemorySlot = -1;
+    }
+}
+
+camera_request_memory CameraDevice::memoryCallback() const {
+    switch (mMemorySlot) {
+        case 0: return sGetMemory0;
+        case 1: return sGetMemory1;
+        case 2: return sGetMemory2;
+        case 3: return sGetMemory3;
+        default: return sGetMemory;
+    }
+}
+
+camera_memory_t* CameraDevice::sGetMemorySlot(int slot, int fd, size_t buf_size, uint_t num_bufs) {
+    CameraDevice* object = sMemorySlots[slot].load();
+    if (object == nullptr) {
+        ALOGE("%s: camera HAL request memory for a closed slot %d!", __FUNCTION__, slot);
+        return nullptr;
+    }
+    return sGetMemory(fd, buf_size, num_bufs, object);
+}
+
+camera_memory_t* CameraDevice::sGetMemory0(int fd, size_t buf_size, uint_t num_bufs, void*) {
+    return sGetMemorySlot(0, fd, buf_size, num_bufs);
+}
+
+camera_memory_t* CameraDevice::sGetMemory1(int fd, size_t buf_size, uint_t num_bufs, void*) {
+    return sGetMemorySlot(1, fd, buf_size, num_bufs);
+}
+
+camera_memory_t* CameraDevice::sGetMemory2(int fd, size_t buf_size, uint_t num_bufs, void*) {
+    return sGetMemorySlot(2, fd, buf_size, num_bufs);
+}
+
+camera_memory_t* CameraDevice::sGetMemory3(int fd, size_t buf_size, uint_t num_bufs, void*) {
+    return sGetMemorySlot(3, fd, buf_size, num_bufs);
+}
+
 camera_memory_t* CameraDevice::sGetMemory(int fd, size_t buf_size, uint_t num_bufs, void *user) {
     ALOGV("%s", __FUNCTION__);
     CameraDevice* object = static_cast<CameraDevice*>(user);
+    if (object == nullptr) {
+        ALOGE("%s: camera HAL request memory without a session!", __FUNCTION__);
+        return nullptr;
+    }
     if (object->mDeviceCallback == nullptr) {
         ALOGE("%s: camera HAL request memory while camera is not opened!", __FUNCTION__);
         return nullptr;
@@ -512,7 +573,8 @@ void CameraDevice::sDataCbTimestamp(nsecs_t timestamp, int32_t msg_type,
         if (mem->mBufSize == sizeof(VideoNativeHandleMetadata)) {
             VideoNativeHandleMetadata* md = (VideoNativeHandleMetadata*)
                     ((uint8_t*) mem->mHidlHeapMemData + index * mem->mBufSize);
-            if (md->eType == kMetadataBufferTypeNativeHandleSource) {
+            if (md->eType == kMetadataBufferTypeNativeHandleSource ||
+                    md->eType == kMetadataBufferTypeCameraSource) {
                 handle = md->pHandle;
             }
         }
@@ -654,6 +716,8 @@ Return<Status> CameraDevice::open(const sp<ICameraDeviceCallback>& callback) {
         return getHidlStatus(res);
     }
 
+    mModule->turnOffLegacyTorch(mCameraId.c_str());
+
     int rc = OK;
     if (mModule->getModuleApiVersion() >= CAMERA_MODULE_API_VERSION_2_3 &&
         info.device_version > CAMERA_DEVICE_API_VERSION_1_0) {
@@ -672,10 +736,11 @@ Return<Status> CameraDevice::open(const sp<ICameraDeviceCallback>& callback) {
 
     initHalPreviewWindow();
     mDeviceCallback = callback;
+    mMemorySlot = claimMemorySlot();
 
     if (mDevice->ops->set_callbacks) {
         mDevice->ops->set_callbacks(mDevice,
-                sNotifyCb, sDataCb, sDataCbTimestamp, sGetMemory, this);
+                sNotifyCb, sDataCb, sDataCbTimestamp, memoryCallback(), this);
     }
 
     return getHidlStatus(rc);
@@ -865,6 +930,8 @@ void CameraDevice::releaseRecordingFrameLocked(
                     return;
                 }
                 md->pHandle = clone;
+            } else if (md->eType == kMetadataBufferTypeCameraSource) {
+                // The HAL still owns its handle in this layout, nothing to hand back.
             } else {
                 ALOGE("%s:Malform VideoNativeHandleMetadata at memId %d, bufferId %d",
                         __FUNCTION__, memId, bufferIndex);
@@ -1017,6 +1084,7 @@ void CameraDevice::closeLocked() {
         }
         mDevice = nullptr;
     }
+    releaseMemorySlot();
 }
 
 }  // namespace implementation
