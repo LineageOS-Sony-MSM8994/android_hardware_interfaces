@@ -252,6 +252,7 @@ WifiChip::WifiChip(int32_t chip_id, bool is_primary,
 
 void WifiChip::retrieveDynamicIfaceCombination() {
     if (using_dynamic_iface_combination_) return;
+    if (isValidModeId(feature_flags::chip_mode_ids::kV1Ap)) return;
 
     legacy_hal::wifi_iface_concurrency_matrix legacy_matrix;
     legacy_hal::wifi_error legacy_status;
