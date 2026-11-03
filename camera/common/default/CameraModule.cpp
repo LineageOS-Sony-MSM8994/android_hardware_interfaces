@@ -18,6 +18,14 @@
 #define ATRACE_TAG ATRACE_TAG_CAMERA
 // #define LOG_NDEBUG 0
 
+#include <errno.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/system_properties.h>
+#include <unistd.h>
+
 #include <utils/Trace.h>
 
 #include "CameraModule.h"
@@ -403,6 +411,7 @@ int CameraModule::getNumberOfCameras() {
 
 int CameraModule::setCallbacks(const camera_module_callbacks_t* callbacks) {
     int res = OK;
+    mCallbacks = callbacks;
     ATRACE_BEGIN("camera_module->set_callbacks");
     if (getModuleApiVersion() >= CAMERA_MODULE_API_VERSION_2_1) {
         res = mModule->set_callbacks(callbacks);
@@ -431,6 +440,11 @@ bool CameraModule::isSetTorchModeSupported() const {
         }
         return true;
     }
+    for (int i = 0; i < mNumberOfCameras; i++) {
+        if (!getLegacyTorchLed(std::to_string(i).c_str()).empty()) {
+            return true;
+        }
+    }
     return false;
 }
 
@@ -440,8 +454,72 @@ int CameraModule::setTorchMode(const char* camera_id, bool enable) {
         ATRACE_BEGIN("camera_module->set_torch_mode");
         res = mModule->set_torch_mode(camera_id, enable);
         ATRACE_END();
+    } else if (getModuleApiVersion() < CAMERA_MODULE_API_VERSION_2_4) {
+        std::string led = getLegacyTorchLed(camera_id);
+        if (led.empty()) {
+            return -ENOSYS;
+        }
+        if (!writeLegacyTorch(camera_id, led, enable)) {
+            return -EIO;
+        }
+        if (mCallbacks != nullptr && mCallbacks->torch_mode_status_change != nullptr) {
+            mCallbacks->torch_mode_status_change(mCallbacks, camera_id,
+                    enable ? TORCH_MODE_STATUS_AVAILABLE_ON : TORCH_MODE_STATUS_AVAILABLE_OFF);
+        }
+        res = OK;
     }
     return res;
+}
+
+void CameraModule::turnOffLegacyTorch(const char* camera_id) {
+    if (mModule->set_torch_mode != NULL ||
+            getModuleApiVersion() >= CAMERA_MODULE_API_VERSION_2_4) {
+        return;
+    }
+    std::string led = getLegacyTorchLed(camera_id);
+    if (!led.empty()) {
+        writeLegacyTorch(camera_id, led, false);
+    }
+}
+
+std::string CameraModule::getLegacyTorchLed(const char* camera_id) const {
+    char led[PROP_VALUE_MAX] = "";
+    __system_property_get((std::string("ro.vendor.camera.legacy_torch.") + camera_id).c_str(),
+            led);
+    return led;
+}
+
+bool CameraModule::writeLegacyTorch(const char* camera_id, const std::string& led,
+        bool enable) const {
+    int brightness = 0;
+    if (enable) {
+        char value[PROP_VALUE_MAX] = "";
+        __system_property_get(
+                (std::string("ro.vendor.camera.legacy_torch_brightness.") + camera_id).c_str(),
+                value);
+        brightness = atoi(value);
+        if (brightness <= 0) {
+            FILE* maxBrightness = fopen((led + "/max_brightness").c_str(), "re");
+            if (maxBrightness == nullptr || fscanf(maxBrightness, "%d", &brightness) != 1 ||
+                    brightness <= 0) {
+                brightness = 255;
+            }
+            if (maxBrightness != nullptr) {
+                fclose(maxBrightness);
+            }
+        }
+    }
+    int fd = TEMP_FAILURE_RETRY(::open((led + "/brightness").c_str(), O_WRONLY | O_CLOEXEC));
+    if (fd < 0 || dprintf(fd, "%d", brightness) < 0) {
+        ALOGE("%s: Cannot write %d to %s/brightness: %s", __FUNCTION__, brightness, led.c_str(),
+                strerror(errno));
+        if (fd >= 0) {
+            ::close(fd);
+        }
+        return false;
+    }
+    ::close(fd);
+    return true;
 }
 
 int CameraModule::isStreamCombinationSupported(int cameraId, camera_stream_combination_t* streams) {
